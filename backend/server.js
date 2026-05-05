@@ -54,7 +54,7 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 /* ---------- Health check (instant response, wakes server) ---------- */
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', models: modelsLoaded, uptime: process.uptime() });
+  res.json({ status: 'ok', version: 'v4-resend-url', models: modelsLoaded, uptime: process.uptime(), resendKey: !!process.env.RESEND_API_KEY });
 });
 
 /* ---------- Resize helper for faster face detection ---------- */
