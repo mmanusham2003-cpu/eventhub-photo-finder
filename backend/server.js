@@ -11,16 +11,34 @@ const faceapi = require('@vladmandic/face-api/dist/face-api.node-wasm.js');
 const { Canvas, Image, ImageData } = canvas;
 faceapi.env.monkeyPatch({ Canvas, Image, ImageData });
 
-// Load models
-async function loadModels() {
+/* ---------- Lazy model loading (faster cold start) ---------- */
+let modelsLoaded = false;
+let modelsLoading = false;
+
+async function ensureModels() {
+  if (modelsLoaded) return;
+  if (modelsLoading) {
+    // Another request is already loading; wait for it
+    while (!modelsLoaded) await new Promise(r => setTimeout(r, 100));
+    return;
+  }
+  modelsLoading = true;
+  console.time('model-load');
   await faceapi.tf.ready();
   const modelPath = path.join(__dirname, 'node_modules', '@vladmandic', 'face-api', 'model');
-  await faceapi.nets.ssdMobilenetv1.loadFromDisk(modelPath);
-  await faceapi.nets.faceLandmark68Net.loadFromDisk(modelPath);
-  await faceapi.nets.faceRecognitionNet.loadFromDisk(modelPath);
-  console.log("Face-api models loaded");
+  await Promise.all([
+    faceapi.nets.ssdMobilenetv1.loadFromDisk(modelPath),
+    faceapi.nets.faceLandmark68Net.loadFromDisk(modelPath),
+    faceapi.nets.faceRecognitionNet.loadFromDisk(modelPath),
+  ]);
+  modelsLoaded = true;
+  modelsLoading = false;
+  console.timeEnd('model-load');
+  console.log('Face-api models loaded');
 }
-loadModels();
+
+// Start loading in background but don't block server startup
+ensureModels().catch(err => console.error('Background model load failed:', err));
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -32,6 +50,11 @@ app.use(cors({
 }));
 app.use(express.json());
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
+/* ---------- Health check (instant response, wakes server) ---------- */
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', models: modelsLoaded, uptime: process.uptime() });
+});
 
 // Set up storage for user selfies
 const storage = multer.diskStorage({
@@ -61,6 +84,9 @@ app.post('/api/find-photos', upload.single('image'), async (req, res) => {
     if (!email) {
       return res.status(400).json({ success: false, error: 'Email is required' });
     }
+
+    // Ensure models are loaded before processing
+    await ensureModels();
 
     const selfiePath = req.file.path;
     console.log(`Processing selfie: ${selfiePath}`);
@@ -187,4 +213,14 @@ app.post('/api/send-photos', async (req, res) => {
 
 app.listen(port, () => {
   console.log(`Server is running on port ${port}`);
+
+  /* ---------- Keep-alive self-ping (prevents Render free-tier sleep) ---------- */
+  const BASE = process.env.BASE_URL;
+  if (BASE) {
+    const INTERVAL = 14 * 60 * 1000; // 14 minutes (Render sleeps after 15 min)
+    setInterval(() => {
+      fetch(`${BASE}/api/health`).catch(() => {});
+    }, INTERVAL);
+    console.log(`Keep-alive ping enabled → every 14 min → ${BASE}/api/health`);
+  }
 });

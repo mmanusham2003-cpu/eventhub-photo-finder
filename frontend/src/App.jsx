@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
 import Webcam from 'react-webcam';
 import axios from 'axios';
 import {
@@ -68,10 +68,33 @@ export default function App() {
   const [step, setStep] = useState(1);
   const [error, setError] = useState(null);
   const [sampleSelected, setSampleSelected] = useState(null);
+  const [serverReady, setServerReady] = useState(false);
 
   const webcamRef = useRef(null);
 
   const videoConstraints = { width: 1280, height: 720, facingMode: 'user' };
+
+  /* Pre-warm backend on page load — server wakes while user fills email */
+  useEffect(() => {
+    let cancelled = false;
+    const warmUp = async () => {
+      try {
+        const res = await fetch(`${API_URL}/api/health`);
+        const data = await res.json();
+        if (!cancelled) setServerReady(data.status === 'ok');
+      } catch {
+        // retry after 3s if server is cold-starting
+        setTimeout(async () => {
+          try {
+            await fetch(`${API_URL}/api/health`);
+            if (!cancelled) setServerReady(true);
+          } catch { /* still waking */ }
+        }, 3000);
+      }
+    };
+    warmUp();
+    return () => { cancelled = true; };
+  }, []);
 
   /* webcam capture */
   const capture = useCallback(() => {
