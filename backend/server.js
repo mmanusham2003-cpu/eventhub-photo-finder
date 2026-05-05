@@ -153,7 +153,7 @@ app.post('/api/find-photos', upload.single('image'), async (req, res) => {
   }
 });
 
-// Endpoint: Send emails with selected photos
+// Endpoint: Send emails with selected photos (uses Resend HTTP API — works on Render)
 app.post('/api/send-photos', async (req, res) => {
   try {
     const { email, selectedPhotos } = req.body;
@@ -163,25 +163,8 @@ app.post('/api/send-photos', async (req, res) => {
     }
 
     console.log(`Sending ${selectedPhotos.length} photos to ${email}`);
-    console.log(`EMAIL_USER: ${process.env.EMAIL_USER ? 'SET' : 'MISSING'}`);
-    console.log(`EMAIL_PASS: ${process.env.EMAIL_PASS ? 'SET' : 'MISSING'}`);
 
-    // Configure Nodemailer — use port 587 + STARTTLS (works on Render/cloud)
-    let transporter = nodemailer.createTransport({
-      host: 'smtp.gmail.com',
-      port: 587,
-      secure: false,
-      auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS
-      },
-      tls: {
-        rejectUnauthorized: false
-      },
-      connectionTimeout: 10000,
-      socketTimeout: 15000,
-    });
-
+    // Build attachments array with base64 content
     const attachments = [];
     const imageTags = [];
 
@@ -190,20 +173,23 @@ app.post('/api/send-photos', async (req, res) => {
       const filename = photoUrl.split('/').pop();
       const filePath = path.join(__dirname, 'uploads', filename);
       
-      // Verify file exists before attaching
       if (!fs.existsSync(filePath)) {
         console.error(`File not found: ${filePath}`);
         continue;
       }
 
-      const cid = `photo_${i}@eventhub.com`;
+      const fileContent = fs.readFileSync(filePath);
+      const base64Content = fileContent.toString('base64');
+      const ext = path.extname(filename).toLowerCase();
+      const mimeType = ext === '.png' ? 'image/png' : 'image/jpeg';
+
       attachments.push({
         filename: filename,
-        path: filePath,
-        cid: cid
+        content: base64Content,
+        type: mimeType
       });
       
-      imageTags.push(`<img src="cid:${cid}" style="max-width: 300px; border-radius: 8px; margin: 5px;" />`);
+      imageTags.push(`<img src="cid:photo_${i}" style="max-width: 300px; border-radius: 8px; margin: 5px;" />`);
     }
 
     if (attachments.length === 0) {
@@ -215,32 +201,87 @@ app.post('/api/send-photos', async (req, res) => {
         <h2 style="color: #6c5ce7;">📸 Here are your event photos!</h2>
         <p>Thanks for attending the event. Here are the ${attachments.length} photo(s) you selected:</p>
         <div style="display: flex; flex-wrap: wrap; gap: 10px;">
-          ${imageTags.join('')}
+          ${attachments.map((a, i) => `<img src="cid:photo_${i}" style="max-width: 300px; border-radius: 8px; margin: 5px;" />`).join('')}
         </div>
         <hr style="margin-top: 20px; border: none; border-top: 1px solid #eee;">
         <p style="color: #999; font-size: 12px;">Sent by EventHub — AI-Powered Event Photography</p>
       </div>
     `;
 
-    const info = await transporter.sendMail({
-      from: `"EventHub" <${process.env.EMAIL_USER}>`,
-      to: email,
-      subject: "📸 Your Event Photos from EventHub",
-      html: htmlContent,
-      attachments: attachments
+    // Use Resend HTTP API (no SMTP port needed — works on all cloud platforms)
+    const resendApiKey = process.env.RESEND_API_KEY;
+    
+    if (!resendApiKey) {
+      // Fallback: try Nodemailer for local dev
+      console.log('No RESEND_API_KEY, falling back to Nodemailer SMTP...');
+      let transporter = nodemailer.createTransport({
+        host: 'smtp.gmail.com',
+        port: 587,
+        secure: false,
+        auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
+        tls: { rejectUnauthorized: false }
+      });
+
+      const nmAttachments = attachments.map((a, i) => ({
+        filename: a.filename,
+        content: Buffer.from(a.content, 'base64'),
+        cid: `photo_${i}`
+      }));
+
+      const info = await transporter.sendMail({
+        from: `"EventHub" <${process.env.EMAIL_USER}>`,
+        to: email,
+        subject: "📸 Your Event Photos from EventHub",
+        html: htmlContent,
+        attachments: nmAttachments
+      });
+      console.log("Email sent via Nodemailer! MessageId:", info.messageId);
+      return res.json({ success: true, message: 'Email sent successfully!' });
+    }
+
+    // Resend API call (HTTP — bypasses SMTP port blocking)
+    const resendAttachments = attachments.map((a, i) => ({
+      filename: a.filename,
+      content: a.content,
+    }));
+
+    const resendPayload = {
+      from: 'EventHub <onboarding@resend.dev>',
+      to: [email],
+      subject: '📸 Your Event Photos from EventHub',
+      html: htmlContent.replace(/cid:photo_\d+/g, (match) => {
+        // Replace CID references with inline data for Resend
+        const idx = parseInt(match.replace('cid:photo_', ''));
+        if (attachments[idx]) {
+          return `data:${attachments[idx].type};base64,${attachments[idx].content}`;
+        }
+        return match;
+      }),
+      attachments: resendAttachments,
+    };
+
+    console.log('Sending via Resend HTTP API...');
+    const resendRes = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${resendApiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(resendPayload),
     });
 
-    console.log("Email sent successfully! MessageId:", info.messageId);
+    const resendData = await resendRes.json();
+    
+    if (!resendRes.ok) {
+      console.error('Resend API error:', resendData);
+      return res.status(500).json({ success: false, error: `Email API error: ${resendData.message || JSON.stringify(resendData)}` });
+    }
 
-    res.json({ 
-      success: true, 
-      message: 'Email sent successfully!', 
-      previewUrl: null 
-    });
+    console.log('Email sent via Resend! ID:', resendData.id);
+    res.json({ success: true, message: 'Email sent successfully!' });
 
   } catch (error) {
     console.error('Error sending email:', error.message);
-    console.error('Full error:', error);
     res.status(500).json({ success: false, error: `Failed to send email: ${error.message}` });
   }
 });
