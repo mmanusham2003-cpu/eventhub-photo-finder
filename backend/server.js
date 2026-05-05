@@ -5,6 +5,7 @@ const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
 const nodemailer = require('nodemailer');
+const { Resend } = require('resend');
 const path = require('path');
 const fs = require('fs');
 
@@ -199,30 +200,23 @@ app.post('/api/send-photos', async (req, res) => {
     const resendApiKey = process.env.RESEND_API_KEY;
     
     if (resendApiKey) {
-      // Production: Resend HTTP API (no SMTP needed)
-      console.log('Sending via Resend HTTP API...');
-      const resendRes = await fetch('https://api.resend.com/emails', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${resendApiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          from: 'EventHub <onboarding@resend.dev>',
-          to: [email],
-          subject: '📸 Your Event Photos from EventHub',
-          html: htmlContent,
-        }),
+      // Production: Resend SDK (HTTP-based, works on all cloud platforms)
+      console.log('Sending via Resend SDK...');
+      const resend = new Resend(resendApiKey);
+      
+      const { data, error: resendError } = await resend.emails.send({
+        from: 'EventHub <onboarding@resend.dev>',
+        to: [email],
+        subject: '📸 Your Event Photos from EventHub',
+        html: htmlContent,
       });
 
-      const resendData = await resendRes.json();
-      
-      if (!resendRes.ok) {
-        console.error('Resend API error:', resendData);
-        return res.status(500).json({ success: false, error: `Email error: ${resendData.message || 'Unknown error'}` });
+      if (resendError) {
+        console.error('Resend error:', resendError);
+        return res.status(500).json({ success: false, error: `Email error: ${resendError.message}` });
       }
 
-      console.log('Email sent via Resend! ID:', resendData.id);
+      console.log('Email sent via Resend! ID:', data.id);
       return res.json({ success: true, message: 'Email sent successfully!' });
     }
 
